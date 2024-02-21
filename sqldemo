@@ -1,0 +1,701 @@
+--invaudit
+
+WITH SourceTransformed AS (
+    SELECT
+        CASE WHEN WORK_AREA = 'PCC' THEN 'USER HOLD' ELSE WORK_AREA END AS WorkArea_v2,
+        UPPER(Q_GROUP) AS Q_GROUP,
+        UPPER(QUEUE) AS QUEUE,
+        UPPER(THERAPY_TYPE) AS Therapy_Type,
+        UPPER(THERAPY_GROUP) AS Therapy_Group,
+        UPPER(ROLE) AS Role,
+        CASE WHEN OGS_WIP_FLAG = 'Y' THEN 'N' ELSE 'Y' END AS IsOnshore,
+        GROUP_ID,
+        QUEUE_ID,
+        SUM(WIP) AS WIP
+    FROM Source
+    WHERE 
+        DPR_FCST_FLAG = 'FCST'
+        AND COALESCE(HISTORY_SOURCE, 'FCST') = 'FCST'
+        AND SOURCE = 'QSF'
+        AND WIP_DATE >= CURRENT_DATE() - 45 
+        AND WIP_DATE < CURRENT_DATE()
+        AND THERAPY_GROUP <> 'Advocate'
+        AND ROLE <> 'Dialer Exc'
+        AND WORK_AREA NOT IN ('Pt O/R', 'Other')
+        AND Q_GROUP <> 'UH Therapy'
+    GROUP BY 
+        WORK_AREA, Q_GROUP, QUEUE, THERAPY_TYPE, THERAPY_GROUP, ROLE, OGS_WIP_FLAG, GROUP_ID, QUEUE_ID
+),
+JoinedWithWBTable AS (
+    SELECT
+        st.WorkArea_v2,
+        st.Role AS Inv_Role,
+        st.Therapy_Type AS Inv_Therapy_Type,
+        st.Therapy_Group AS Inv_Therapy_Group,
+        st.Q_GROUP AS Inv_Q_GROUP,
+        st.QUEUE AS Inv_QUEUE,
+        st.IsOnshore AS Inv_IsOnshore,
+        st.GROUP_ID,
+        st.QUEUE_ID,
+        wb.Queue_Name,
+        wb.Home_Team,
+        st.WIP
+    FROM SourceTransformed st
+    LEFT JOIN wbtable wb ON
+        st.WorkArea_v2 = wb."Prod-WorkArea.v2"
+        AND st.Role = wb."prod-Role"
+        AND st.Therapy_Type = wb."Prod-TherapyType"
+        AND st.Therapy_Group = wb."prod-TherapyGroup"
+        AND st.Q_GROUP = wb."prod-Q_Group"
+        AND st.QUEUE = wb.Queue_Name
+        AND st.IsOnshore = wb."prod-IsOnshore"
+),
+AggregatedData AS (
+    SELECT
+        WorkArea_v2,
+        Inv_Role,
+        Inv_Therapy_Type,
+        Inv_Therapy_Group,
+        Inv_Q_GROUP,
+        Queue_Name AS Inv_QUEUE,
+        Inv_IsOnshore,
+        GROUP_ID,
+        QUEUE_ID,
+        Home_Team,
+        SUM(WIP) AS Count
+    FROM JoinedWithWBTable
+    GROUP BY 
+        WorkArea_v2, Inv_Role, Inv_Therapy_Type, Inv_Therapy_Group, Inv_Q_GROUP, Queue_Name, Inv_IsOnshore, GROUP_ID, QUEUE_ID, Home_Team
+)
+SELECT
+    WorkArea_v2,
+    Inv_Role,
+    Inv_Therapy_Type,
+    Inv_Therapy_Group,
+    Inv_Q_GROUP,
+    Queue_Name,
+    Inv_QUEUE,
+    Inv_IsOnshore,
+    QUEUE_ID,
+    Home_Team,
+    Count,
+    GROUP_ID
+FROM AggregatedData
+ORDER BY Queue_Name ASC;
+
+
+
+
+
+
+
+--inv
+
+WITH FilteredSource AS (
+    SELECT
+        Q_GROUP,
+        "QUEUE",
+        GROUP_ID,
+        QUEUE_ID,
+        OGS_WIP_FLAG AS "OGS WIP Flag",
+        THERAPY_TYPE AS "Therapy Type", 
+        THERAPY_GROUP AS "Therapy Group",
+        WORK_AREA,
+        "Role",
+        Load_Date,
+        WIP_Date AS "WIP Date",
+        DOW,
+        WIP_Hour AS "WIP Hour", 
+        SUM(WIP) AS WIP
+    FROM Source1
+    WHERE
+        DPR_FCST_FLAG = 'FCST'
+        AND COALESCE(HISTORY_SOURCE, 'FCST') = 'FCST'
+        AND SOURCE = 'QSF'
+        AND WIP_DATE >= CURRENT_DATE() - 120
+        AND WIP_DATE < CURRENT_DATE()
+        AND WORK_AREA NOT IN ('Pt O/R', 'Other')
+        AND THERAPY_GROUP <> 'Advocate'
+        AND "Role" <> 'Dialer Exc'
+        AND Q_GROUP <> 'UH Therapy'
+    GROUP BY
+        Q_GROUP,
+        "QUEUE",
+        GROUP_ID,
+        QUEUE_ID,
+        OGS_WIP_FLAG,
+        THERAPY_TYPE,
+        THERAPY_GROUP,
+        WORK_AREA,
+        "Role",
+        Load_Date,
+        WIP_Date,
+        DOW,
+        WIP_Hour
+),
+Transformed AS (
+    SELECT
+        CASE WHEN WORK_AREA = 'PCC' THEN 'USER HOLD' ELSE WORK_AREA END AS WorkArea_v2,
+        UPPER(Q_GROUP) AS Q_GROUP,
+        UPPER("QUEUE") AS QUEUE,
+        UPPER(THERAPY_TYPE) AS "Therapy Type",
+        UPPER(THERAPY_GROUP) AS "Therapy Group",
+        UPPER("Role") AS "Role",
+        CASE WHEN "OGS WIP Flag" = 'Y' THEN 'N' ELSE 'Y' END AS IsOnshore,
+        GROUP_ID,
+        QUEUE_ID,
+        "WIP Date",
+        WIP
+    FROM FilteredSource
+),
+JoinedWithWBTable AS (
+    SELECT
+        t.*,
+        wb.Queue_ID AS WB_Queue_ID,
+        wb.From_Date,
+        wb.To_Date
+    FROM Transformed t
+    LEFT JOIN wbtable wb ON
+        t.WorkArea_v2 = wb."Prod-WorkArea.v2"
+        AND t."Role" = wb."Prod-Role"
+        AND t."Therapy Type" = wb."Prod-TherapyType"
+        AND t."Therapy Group" = wb."Prod-TherapyGroup"
+        AND t.Q_GROUP = wb."Prod-Q_Group"
+        AND t.QUEUE = wb.Workbasket
+        AND t.IsOnshore = wb."Prod-IsOnshore"
+),
+DateFiltered AS (
+    SELECT
+        *,
+        CASE WHEN "WIP Date" >= From_Date AND "WIP Date" <= To_Date THEN 'Y' ELSE 'N' END AS DateInRange
+    FROM JoinedWithWBTable
+),
+FinalSelect AS (
+    SELECT
+        "WIP Date",
+        WB_Queue_ID AS Queue_ID,
+        SUM(WIP) AS WIP
+    FROM DateFiltered
+    WHERE
+        WB_Queue_ID IS NOT NULL
+        AND DateInRange = 'Y'
+        AND WB_Queue_ID NOT IN ('Exclude', 'Identify')
+    GROUP BY
+        "WIP Date",
+        WB_Queue_ID
+    ORDER BY
+        WB_Queue_ID ASC,
+        "WIP Date" ASC
+)
+SELECT * FROM FinalSelect;
+
+
+
+
+
+
+--prdaud
+
+WITH CTE_Source AS (
+    SELECT *
+    FROM source2
+    WHERE
+        "Date" >= CURRENT_DATE() - INTERVAL '20 DAYS' AND
+        "Date" < CURRENT_DATE()
+),
+CTE_Filtered AS (
+    SELECT *
+    FROM CTE_Source
+    WHERE
+        "Work Area" NOT IN ('Pt O/R', 'Other', 'x') AND
+        "Q_Group" NOT IN ('Open Time', 'UH Therapy', 'SME/Lead', 'Tech ETE') AND
+        "Therapy Group" <> 'Advocate' AND
+        ("Therapy Type" = 'Therapy' OR "Therapy Type" = 'Core')
+),
+CTE_TransformedUpperCase AS (
+    SELECT
+        UPPER("Work Area") AS "Work Area",
+        UPPER("Role") AS "Role",
+        UPPER("Q_Group") AS "Q_Group",
+        UPPER("Queue") AS "Queue",
+        UPPER("Therapy Type") AS "Therapy Type",
+        UPPER("Therapy Group") AS "Therapy Group",
+        *,
+        CASE WHEN "Role" = 'CLERK PHONE' THEN 'CLERK' ELSE "Role" END AS "Role_Corrected"
+    FROM CTE_Filtered
+),
+CTE_AddedColumn AS (
+    SELECT *,
+        CASE WHEN "Work Area" = 'PCC' THEN 'USER HOLD' ELSE "Work Area" END AS "WorkArea.v2"
+    FROM CTE_TransformedUpperCase
+),
+CTE_RemovedColumns AS (
+    SELECT
+        "Prod-WorkArea.v2",
+        "Prod-Role",
+        "Prod-TherapyType",
+        "Prod-TherapyGroup",
+        "Prod-Q_Group",
+        "Queue_Name",
+        "Workbasket",
+        "Prod-IsOnshore",
+        "Queue_ID",
+        "Home_Team",
+        "Order_Count_UI"
+    FROM CTE_AddedColumn
+),
+CTE_JoinedWithWBTable AS (
+    SELECT
+        CTE.*,
+        wb."Queue_ID" AS WB_Queue_ID,
+        wb."From_Date",
+        wb."To_Date",
+        wb."Queue_Name",
+        wb."Home_Team"
+    FROM CTE_RemovedColumns CTE
+    LEFT JOIN wbtable wb ON
+        CTE."WorkArea.v2" = wb."Prod-WorkArea.v2" AND
+        CTE."Therapy Type" = wb."Prod-TherapyType" AND
+        CTE."Therapy Group" = wb."Prod-TherapyGroup" AND
+        CTE."Role_Corrected" = wb."Prod-Role" AND
+        CTE."Q_Group" = wb."Prod-Q_Group" AND
+        CTE."Queue" = wb.Workbasket
+),
+CTE_Grouped AS (
+    SELECT
+        "Prod-WorkArea.v2",
+        "Prod-Role",
+        "Prod-TherapyType",
+        "Prod-TherapyGroup",
+        "Prod-Q_Group",
+        "Queue_Name",
+        "Prod-Queue",
+        "Prod-IsOnshore",
+        "Queue_ID",
+        "Home_Team",
+        SUM("Production") AS Production,
+        SUM("Hours") AS Hours,
+        SUM("Order_Count_UI") AS "Order Count"
+    FROM CTE_JoinedWithWBTable
+    GROUP BY
+        "Prod-WorkArea.v2",
+        "Prod-Role",
+        "Prod-TherapyType",
+        "Prod-TherapyGroup",
+        "Prod-Q_Group",
+        "Queue_Name",
+        "Prod-Queue",
+        "Prod-IsOnshore",
+        "Queue_ID",
+        "Home_Team"
+)
+SELECT *
+FROM CTE_Grouped
+ORDER BY "Queue_Name" ASC;
+
+
+
+
+
+
+--bdmprd
+
+
+-- Step 1: Start with the base data, applying date filters and initial sorting
+WITH BaseData AS (
+    SELECT *,
+           "Date" -- Step 2: Assuming Date conversion is handled if needed; kept as-is for simplicity
+    FROM AIR -- Assuming dbo.AIR is adjusted to Snowflake schema/table naming
+    WHERE "Date" >= CURRENT_DATE() - 40 AND "Date" < CURRENT_DATE() - 1
+    -- Step 3 to 5: Initial data filtering is incorporated into the WHERE clause
+),
+-- Step 6 to 11: Apply row filters based on Work Area, Q_Group, Therapy Group, and Therapy Type
+FilteredData AS (
+    SELECT *
+    FROM BaseData
+    WHERE "Work Area" NOT IN ('Pt O/R', 'Other', 'x') -- Step 7
+      AND "Q_Group" NOT IN ('Open Time', 'Tech ETE', 'SME/Lead') -- Step 8
+      AND "Therapy Group" <> 'Advocate' -- Step 9
+      AND "Therapy Type" IN ('Therapy', 'Core') -- Step 10
+    -- Step 11 involves transforming columns which will be handled in the next CTE
+),
+-- Step 12 to 23: Transform columns to UPPER case and handle the ProdNullReplace logic
+TransformedData AS (
+    SELECT
+        UPPER("Work Area") AS "Work Area", -- Step 13
+        UPPER("Role") AS Role, -- Step 14
+        UPPER("Q_Group") AS Q_Group, -- Additional UPPER transformations as needed
+        -- Handle null or negative production values for ProdNullReplace -- Step 17
+        CASE 
+            WHEN "Production" IS NULL THEN "Order Count"
+            WHEN "Production" < 0 THEN 0
+            ELSE "Production"
+        END AS Production,
+        "Queue ID", -- Queue ID included for join operations later
+        "Date" -- Keeping Date for filtering/joining in later steps
+    FROM FilteredData
+),
+-- Step 24: Join with WBTable for additional data enrichment
+JoinedData AS (
+    SELECT td.*, 
+           wb.Queue_Name,
+           wb.Queue_ID AS WB_Queue_ID,
+           wb.Home_Team,
+           wb.From_Date,
+           wb.To_Date
+    FROM TransformedData td
+    LEFT JOIN WBTable wb ON td."Queue ID" = wb.Queue_ID 
+    -- Further join conditions and logic to be adapted based on actual requirements
+),
+-- Step 25 to 44: Apply further row filters, transformations, and aggregations as per Power Query steps
+FinalTransformations AS (
+    SELECT *,
+           -- Example transformation for WorkArea_v2 as per Step 25
+           CASE
+               WHEN "Work Area" = 'PCC' THEN 'USER HOLD'
+               ELSE "Work Area"
+           END AS WorkArea_v2,
+           -- Handling ProdIsOnshore logic as per Steps 26 to 29
+           CASE 
+               WHEN WorkGroup2 = 'TECH' OR WorkGroup2 = 'RPH' OR MU_Therapy = 'THERAPY' THEN 'Y'
+               ELSE 'N' -- Default value, adjust as necessary
+           END AS ProdIsOnshore,
+           "Date" -- Kept for potential use in final output conditions
+    FROM JoinedData
+    -- Include WHERE clause for additional row filtering as per Steps 30 to 44
+),
+-- Final aggregation and preparation of the data as per the grouping and summarization instructions
+AggregatedData AS (
+    SELECT
+        "Date",
+        WorkArea_v2,
+        SUM(Production) AS TotalProduction -- Example aggregation
+    FROM FinalTransformations
+    GROUP BY "Date", WorkArea_v2
+)
+-- Final SELECT to format the output as per the requirements
+SELECT *
+FROM AggregatedData
+ORDER BY "Date" DESC, WorkArea_v2
+-- Steps 38 to 44 involve final adjustments to the output, including ordering and selecting specific columns
+
+
+
+
+
+--prdforinv
+
+
+
+-- Initial source table selection with basic transformations and filtering
+WITH Source AS (
+    SELECT 
+        CAST("From_Date" AS DATE) AS "Date", -- Transform "Date" to date type
+        UPPER("Prod-WorkArea.v2") AS "Work Area", -- Transform columns to upper case
+        UPPER("prod-Role") AS "Role",
+        UPPER("Prod-TherapyType") AS "Therapy Type",
+        UPPER("prod-TherapyGroup") AS "Therapy Group",
+        UPPER("prod-Q_Group") AS "Q_Group",
+        UPPER("Queue_Name") AS "Queue",
+        "prod-IsOnshore" AS "IsOnshore",
+        "Queue_ID",
+        "home_Team",
+        "Order_Count_UI",
+        "From_Date",
+        "ToDate"
+    FROM 
+        wbtable
+    WHERE
+        "Prod-WorkArea.v2" NOT IN ('Pt O/R', 'Other', 'x') AND
+        "prod-Q_Group" NOT IN ('Open Time', 'Tech ETE', 'SME/Lead') AND
+        "prod-TherapyGroup" <> 'Advocate' AND
+        "Prod-TherapyType" IN ('Therapy', 'Core')
+),
+
+-- Replace specific values and add new column based on conditions
+ReplacedAndAddedColumns AS (
+    SELECT 
+        *,
+        CASE 
+            WHEN "Role" = 'CLERK PHONE' THEN 'CLERK'
+            ELSE "Role" 
+        END AS "Role_Adjusted",
+        CASE 
+            WHEN "Work Area" = 'PCC' THEN 'USER HOLD'
+            ELSE "Work Area" 
+        END AS "WorkArea_v2"
+    FROM 
+        Source
+),
+
+-- Remove unnecessary columns
+RemovedColumns AS (
+    SELECT 
+        "Date", 
+        "Role_Adjusted" AS "Role", 
+        "Therapy Type", 
+        "Therapy Group", 
+        "Q_Group", 
+        "Queue", 
+        "IsOnshore", 
+        "Queue_ID", 
+        "WorkArea_v2",
+        "Order_Count_UI"
+    FROM 
+        ReplacedAndAddedColumns
+),
+
+-- Join with WBTable (adjust for actual join conditions)
+JoinedWithWBTable AS (
+    SELECT 
+        RC.*,
+        WBT."Queue_ID" AS "WBTable_Queue_ID",
+        WBT."Order_Count_UI" AS "Order_Count_Flag"
+    FROM 
+        RemovedColumns RC
+        LEFT JOIN wbtable WBT ON 
+            RC."WorkArea_v2" = WBT."Prod-WorkArea.v2" AND
+            RC."Therapy Type" = WBT."Prod-TherapyType" AND
+            RC."Therapy Group" = WBT."prod-TherapyGroup" AND
+            RC."Role" = WBT."prod-Role" AND
+            RC."Q_Group" = WBT."prod-Q_Group" AND
+            RC."Queue" = WBT."Queue_Name" AND
+            RC."IsOnshore" = WBT."prod-IsOnshore"
+),
+
+-- Add ProdCount column and final filtering
+FinalQuery AS (
+    SELECT 
+        "Date", 
+        "Queue_ID", 
+        "WBTable_Queue_ID", 
+        CASE 
+            WHEN "Order_Count_Flag" = 'X' THEN "Order_Count_UI"
+            ELSE NULL -- Assuming handling for cases not specified; adjust as necessary
+        END AS "ProdCount"
+    FROM 
+        JoinedWithWBTable
+    WHERE 
+        "Queue_ID" NOT IN ('Identify', 'Exclude') AND
+        "Queue_ID" IS NOT NULL
+),
+
+-- Group by Date and Queue ID, and order as requested
+GroupedAndOrdered AS (
+    SELECT 
+        "Date", 
+        "Queue_ID", 
+        SUM("ProdCount") AS "Count"
+    FROM 
+        FinalQuery
+    GROUP BY 
+        "Date", 
+        "Queue_ID"
+    ORDER BY 
+        "Queue_ID" ASC, 
+        "Date" ASC
+)
+
+-- Final selection from the grouped and ordered subquery
+SELECT * FROM GroupedAndOrdered;
+
+
+
+
+---bdmInv
+
+
+-- Step 1: Load Source Tables
+WITH 
+QueueTable AS (
+    SELECT 
+        "Queue ID",
+        "Queue Name",
+        "Team ID",
+        "Team Name",
+        "Inv.Q.ID",
+        "Order Count UI",
+        "Reverse Queue",
+        "From Date",
+        "To Date"
+    FROM YourQueueTableSource -- Placeholder for actual table name or import query
+),
+Inventory AS (
+    SELECT 
+        WIP_Date,
+        Queue_ID,
+        WIP
+    FROM Inventory
+),
+ProdForInventory AS (
+    SELECT 
+        Date,
+        Queue_ID,
+        Count
+    FROM ProdForInventory
+),
+TeamTable AS (
+    SELECT 
+        Team_ID,
+        Team,
+        Parent_Plan_ID,
+        Parent_Plan,
+        Team_Hierarchy_1,
+        Team_Hierarchy_2,
+        Team_Hierarchy_3,
+        Team_Hierarchy_4,
+        Team_Hierarchy_5
+    FROM TeamTable
+),
+
+-- Step 2: Transform Column Types and Remove Unnecessary Columns
+TransformedQueueTable AS (
+    SELECT 
+        "Queue ID",
+        "Queue Name",
+        "Team ID",
+        "Reverse Queue",
+        "From Date",
+        "To Date"
+    FROM QueueTable
+),
+
+-- Step 3: Generate Date Series
+DateSeries AS (
+    SELECT 
+        QT."Queue ID",
+        QT."Queue Name",
+        QT."Team ID",
+        QT."Reverse Queue",
+        DATEADD(DAY, SEQ4(), QT."From Date") AS Date
+    FROM TransformedQueueTable QT
+    CROSS JOIN TABLE(GENERATOR(ROWCOUNT => DATEDIFF(DAY, QT."From Date", QT."To Date") + 1)) AS SEQ4
+),
+
+-- Step 4: Join with Inventory and ProdForInventory
+MergedData AS (
+    SELECT 
+        DS."Queue ID",
+        DS."Queue Name",
+        DS.Date,
+        COALESCE(INV.WIP, 0) AS WIP,
+        COALESCE(PFI.Count, 0) AS ProdCount
+    FROM DateSeries DS
+    LEFT JOIN Inventory INV ON DS."Queue ID" = INV.Queue_ID AND DS.Date = INV.WIP_Date
+    LEFT JOIN ProdForInventory PFI ON DS."Queue ID" = PFI.Queue_ID AND DS.Date = PFI.Date
+),
+
+-- Step 5: Replace Null Values with 0
+ReplacedData AS (
+    SELECT 
+        "Queue ID",
+        "Queue Name",
+        Date,
+        NVL(WIP, 0) AS WIP,
+        NVL(ProdCount, 0) AS ProdCount
+    FROM MergedData
+),
+
+-- Step 6: Calculate Next Date and Prior Date
+NextPriorData AS (
+    SELECT 
+        RD.*,
+        DATEADD(DAY, 1, RD.Date) AS NextDate,
+        DATEADD(DAY, -1, RD.Date) AS PriorDate
+    FROM ReplacedData RD
+),
+
+-- Step 7: Calculate OpenWIP1
+OpenWIP1Data AS (
+    SELECT 
+        NP.*,
+        CASE 
+            WHEN "Reverse Queue" = 'X' THEN ProdCount
+            ELSE WIP
+        END AS OpenWIP1
+    FROM NextPriorData NP
+),
+
+-- Step 8: Calculate PriorWIP
+PriorWIPData AS (
+    SELECT 
+        OW1.*,
+        LEAD(OpenWIP1) OVER(PARTITION BY "Queue ID" ORDER BY Date) AS NextWIP1,
+        LAG(OpenWIP1) OVER(PARTITION BY "Queue ID" ORDER BY Date) AS PriorWIP
+    FROM OpenWIP1Data OW1
+),
+
+-- Step 9: Calculate CloseWIP1
+CloseWIP1Data AS (
+    SELECT 
+        PW.*,
+        CASE 
+            WHEN PriorWIP <> 0 THEN PriorWIP
+            WHEN ProdCount = 0 AND OpenWIP1 <> 0 THEN OpenWIP1
+            ELSE NextWIP1
+        END AS CloseWIP1
+    FROM PriorWIPData PW
+),
+
+-- Step 10: Calculate OpenWIP2
+OpenWIP2Data AS (
+    SELECT 
+        CW1.*,
+        NVL(OpenWIP1, 0) AS OpenWIP2
+    FROM CloseWIP1Data CW1
+),
+
+-- Step 11: Calculate CloseWIP2
+CloseWIP2Data AS (
+    SELECT 
+        OW2.*,
+        CASE 
+            WHEN CloseWIP1 <> 0 THEN CloseWIP1
+            WHEN ProdCount = 0 AND OpenWIP2 <> 0 THEN OpenWIP2
+            ELSE NextWIP2
+        END AS CloseWIP2
+    FROM OpenWIP2Data OW2
+),
+
+-- Step 12: Additional transformations (if any)
+FinalData AS (
+    SELECT 
+        CW2.*,
+        -- Additional transformations go here
+    FROM CloseWIP2Data CW2
+)
+
+-- Step 13: Join with TeamTable for hierarchy information and add placeholder metrics
+SELECT 
+    FD."Queue ID",
+    FD."Queue Name",
+    FD.Date,
+    FD.WIP,
+    FD.ProdCount,
+    FD.OpenWIP1,
+    FD.PriorWIP,
+    FD.NextWIP1,
+    FD.CloseWIP1,
+    FD.OpenWIP2,
+    FD.CloseWIP2,
+    -- Assuming Avg TAT, TAT % Meeting SLA calculations will be done here or set as NULL for placeholders
+    NULL AS "Avg TAT",
+    NULL AS "TAT % Meeting SLA",
+    -- Aged Day placeholders
+    NULL AS "Aged Day 0",
+    NULL AS "Aged Day 1",
+    NULL AS "Aged Day 2",
+    NULL AS "Aged Day 3", -- Note: This was not in your initial list, you might need to adjust based on your requirements
+    NULL AS "Aged Day 4",
+    NULL AS "Aged Day 5",
+    NULL AS "Aged Day 5+",
+    TT.Parent_Plan_ID,
+    TT.Parent_Plan,
+    TT.Team_Hierarchy_1,
+    TT.Team_Hierarchy_2,
+    TT.Team_Hierarchy_3,
+    TT.Team_Hierarchy_4,
+    TT.Team_Hierarchy_5
+FROM FinalData FD
+LEFT JOIN TeamTable TT ON FD."Team ID" = TT.Team_ID;
+
